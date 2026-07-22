@@ -1,30 +1,54 @@
-"""Sentiment analysis using a lightweight DistilBERT model."""
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, pipeline
-from typing import Dict, Any
-import torch
+"""Sentiment enrichment with an optional transformer backend."""
 
-# Load model once (singleton)
+from __future__ import annotations
+
+import logging
+import re
+from functools import lru_cache
+from typing import Any, Callable, Dict
+
+logger = logging.getLogger(__name__)
 _MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
-_tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
-_model = AutoModelForSequenceClassification.from_pretrained(_MODEL_NAME)
-_sentiment_pipe = pipeline(
-    "sentiment analysis",
-    model=_model,
-    tokenizer=_tokenizer,
-    return_all_scores=False,
-    device=0 if torch.cuda.is_available() else -1,
-)
+_POSITIVE = {"good", "great", "safe", "success", "positive", "improved", "love", "excellent"}
+_NEGATIVE = {"bad", "danger", "failure", "negative", "worse", "hate", "critical", "emergency"}
+
+
+@lru_cache(maxsize=1)
+def _load_pipeline() -> Callable[[str], list[dict[str, Any]]] | None:
+    try:
+        import torch
+        from transformers import pipeline
+
+        return pipeline(
+            "sentiment-analysis",
+            model=_MODEL_NAME,
+            device=0 if torch.cuda.is_available() else -1,
+        )
+    except (ImportError, OSError) as exc:
+        logger.info("Transformer sentiment backend unavailable; using lexical fallback: %s", exc)
+        return None
+
+
+def _fallback_sentiment(text: str) -> tuple[str, float]:
+    words = set(re.findall(r"[a-z]+", text.lower()))
+    balance = len(words & _POSITIVE) - len(words & _NEGATIVE)
+    if balance > 0:
+        return "POSITIVE", min(0.99, 0.55 + 0.1 * balance)
+    if balance < 0:
+        return "NEGATIVE", min(0.99, 0.55 + 0.1 * abs(balance))
+    return "NEUTRAL", 0.5
 
 
 def add_sentiment(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Add sentiment label and score to the record."""
-    text = record.get("text", "")
+    text = str(record.get("text") or "").strip()
     if not text:
         return record
-    result = _sentiment_pipe(text[:512])  # truncate to model max length
-    # result is list of dicts with 'label' and 'score'
-    label = result[0]["label"]
-    score = float(result[0]["score"])
+    sentiment_pipeline = _load_pipeline()
+    if sentiment_pipeline is None:
+        label, score = _fallback_sentiment(text)
+    else:
+        result = sentiment_pipeline(text[:512])[0]
+        label, score = str(result["label"]), float(result["score"])
     record["sentiment_label"] = label
     record["sentiment_score"] = score
     return record

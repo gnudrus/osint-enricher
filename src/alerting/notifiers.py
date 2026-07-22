@@ -1,9 +1,7 @@
 """Notifier implementations (email, webhook, Slack)."""
 import smtplib
-import json
 import logging
 from email.message import EmailMessage
-from typing import Any
 import requests
 
 from .base import Notifier

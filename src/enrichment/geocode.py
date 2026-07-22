@@ -1,14 +1,34 @@
-"""Geocoding enrichment using Nominatim (geopy)."""
-from geopy.geocoders import Nominatim
-from typing import Dict, Any
+"""Geocoding enrichment using Nominatim."""
+
+from __future__ import annotations
+
 import logging
+from functools import lru_cache
+from typing import Any, Dict
+
+from geopy.exc import GeocoderServiceError, GeocoderTimedOut
+from geopy.geocoders import Nominatim
 
 logger = logging.getLogger(__name__)
-_geolocator = Nominatim(user_agent="osint-enricher")
+
+
+@lru_cache(maxsize=1)
+def _geolocator() -> Nominatim:
+    return Nominatim(user_agent="osint-enricher/0.2")
 
 
 def add_location(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Add latitude/longitude if a place name is present."""
-    # Example: if record contains a "location" free-text field, try to geocode.
-    # For simplicity, we return unchanged.
+    if record.get("latitude") is not None and record.get("longitude") is not None:
+        return record
+    place = str(record.get("location") or "").strip()
+    if not place:
+        return record
+    try:
+        result = _geolocator().geocode(place, exactly_one=True, timeout=10)
+    except (GeocoderServiceError, GeocoderTimedOut) as exc:
+        logger.warning("Geocoding failed for %s: %s", place, exc)
+        return record
+    if result:
+        record["latitude"] = float(result.latitude)
+        record["longitude"] = float(result.longitude)
     return record
