@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # MinIO (S3 compatible) for storage tests
+      minio:
+        image: quay.io/minio/minio
+        env:
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+        ports: ["9000:9000", "9001:9001"]
+        options: >-
+          server /data
+      # Redis for caching
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      # MinIO connection info used by the app
+      MINIO_ENDPOINT: http://localhost:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests
+        run: |
+          pytest -v --cov=src --cov-report=xml
+
+      - name: Upload coverage to Codecov (optional)
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          fail_ci_if_error: false
+
+      - name: Build Docker image
+        run: |
+          docker build -t osint-enricher:ci .
+
+      - name: Test Docker container (basic)
+        run: |
+          docker run --rm -d --name osint-test \
+            -e MINIO_ENDPOINT=http://host.docker.internal:9000 \
+            -e MINIO_ACCESS_KEY=minioadmin \
+            -e MINIO_SECRET_KEY=minioadmin \
+            -e REDIS_HOST=host.docker.internal \
+            -e REDIS_PORT=6379 \
+            osint-enricher:ci \
+            echo "Container started"
+          # Wait a moment then stop
+          sleep 5
+          docker stop osint-test
+          "Fix: Restore GitHub Actions workflow CI"
