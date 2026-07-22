@@ -1,59 +1,60 @@
-"""Streamlit demo UI for OSINT-Enricher."""
-import streamlit as st
-import pandas as pd
-import pydeck as pdk
+"""Streamlit demo UI for OSINT Enricher."""
+
 from pathlib import Path
 
-st.set_page_config(page_title="OSINT Enricher Demo", layout="wide")
-st.title("?? OSINT Enricher – Demo")
+import pandas as pd
+import pydeck as pdk
+import streamlit as st
 
-# Sidebar controls
+st.set_page_config(page_title="OSINT Enricher Demo", layout="wide")
+st.title("OSINT Enricher â€” Demo")
+
 st.sidebar.header("Data source")
 data_dir = st.sidebar.text_input("Enriched data directory (Parquet)", "data/enriched")
 if st.sidebar.button("Load data"):
     path = Path(data_dir)
-    if not path.exists():
+    if not path.is_dir():
         st.error(f"Directory {path} does not exist")
     else:
-        # Read all parquet files
         files = list(path.glob("*.parquet"))
         if not files:
-            st.warning("No parquet files found")
+            st.warning("No Parquet files found")
         else:
-            dfs = [pd.read_pe(f) for f in files]
-            df = pd.concat(dfs, ignore_index=True)
-            st.session_state["df"] = df
-            st.success(f"Loaded {len(df)} records")
+            st.session_state["df"] = pd.concat(
+                [pd.read_parquet(file) for file in files], ignore_index=True
+            )
+            st.success(f"Loaded {len(st.session_state['df'])} records")
 
 if "df" not in st.session_state:
-    st.info("?? Load data from the sidebar")
+    st.info("Load data from the sidebar")
 else:
     df = st.session_state["df"]
     st.subheader("Recent events")
     st.dataframe(df.head(20))
 
     if {"latitude", "longitude"}.issubset(df.columns):
-        st.subheader("Map view")
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=df.dropna(subset=["latitude", "longitude"]),
-            get_position=["longitude", "latitude"],
-            get_radius=1000,
-            get_color=[200, 30, 0, 160],
-            pickable=True,
-        )
-        view_state = pdk.ViewState(
-            latitude=df["latitude"].mean(),
-            longitude=df["longitude"].mean(),
-            zoom=4,
-            pitch=0,
-        )
-        r = pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{text}"})
-        st.pydeck_chart(r)
+        mapped = df.dropna(subset=["latitude", "longitude"])
+        if not mapped.empty:
+            st.subheader("Map view")
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=mapped,
+                get_position=["longitude", "latitude"],
+                get_radius=1000,
+                get_color=[200, 30, 0, 160],
+                pickable=True,
+            )
+            view_state = pdk.ViewState(
+                latitude=float(mapped["latitude"].mean()),
+                longitude=float(mapped["longitude"].mean()),
+                zoom=4,
+            )
+            st.pydeck_chart(
+                pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{text}"})
+            )
     else:
-        st.warning("No geolocation data available for mapping.")
+        st.warning("No geolocation data available for mapping")
 
-    # Sentiment distribution
     if "sentiment_label" in df.columns:
         st.subheader("Sentiment breakdown")
         st.bar_chart(df["sentiment_label"].value_counts())

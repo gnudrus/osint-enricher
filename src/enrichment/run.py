@@ -1,86 +1,69 @@
-"""Entry point for running the enrichment pipeline."""
+"""Command-line entry point for the enrichment pipeline."""
+
+from __future__ import annotations
+
 import argparse
+import json
 import logging
-import os
 from pathlib import Path
+from typing import Any
 
-import pandas as pd  # assuming we store as Parquet; adjust as needed
+import pandas as pd
 
-from .geocode import add_location
-from .sentiment import add_sentiment
-from .entity import add_entities
-from .source_score import add_source_score
+from .base import enrich_record
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def enrich_record(record: dict) -> dict:
-    """Apply all enrichment steps to a single record."""
-    for func in (add_location, add_sentiment, add_entities, add_source_score):
-        try:
-            record = func(record)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("Enrichment step %s failed: %s", func.__name__, exc)
-    return record
-
-
-def run(input_dir: str, output_dir: str) -> None:
-    """Read raw JSON/JSONL files, enrich, and write Parquet."""
-    in_path = Path(input_dir)
-    out_path = Path(output_dir)
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    # For demo, we assume each file is a JSON lines file.
-    for file in in_path.glob("*.json*"):
-        logger.info("Processing %s", file.name)
-        # Read lines
+def read_records(path: Path) -> list[dict[str, Any]]:
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
         records = []
-        with open(file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    # Expect JSON per line
-                    import json
-                    rec = json.loads(line)
-                    records.append(rec)
-                except json.JSONDecodeError:
-                    # If file is a single JSON array, fallback
-                    pass
-        if not records:
-            # Try to read whole file as JSON
-            import json
-            with open(file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    records = data
-                else:
-                    records = [data]
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON in {path} at line {line_number}") from exc
+            if not isinstance(value, dict):
+                raise ValueError(f"JSONL record at line {line_number} must be an object")
+            records.append(value)
+        return records
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        return value
+    raise ValueError(f"{path} must contain a JSON object, an array of objects, or JSONL")
 
-        enriched = [enrich_record(r) for r in records]
-        # Write as Parquet (requires pyarrow or fastparquet)
-        df = pd.DataFrame(enriched)
-        out_file = out_path / f"{file.stem}.parquet"
-        df.to_parquet(out_file, index=False)
-        logger.info("Written %d records to %s", len(enriched), out_file)
+
+def run(input_dir: str | Path, output_dir: str | Path) -> list[Path]:
+    source_dir = Path(input_dir)
+    if not source_dir.is_dir():
+        raise NotADirectoryError(f"Input directory not found: {source_dir}")
+    destination_dir = Path(output_dir)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    outputs = []
+    for source_file in sorted(source_dir.glob("*.json*")):
+        records = read_records(source_file)
+        enriched = [enrich_record(record) for record in records]
+        output_file = destination_dir / f"{source_file.stem}.parquet"
+        pd.DataFrame(enriched).to_parquet(output_file, index=False)
+        outputs.append(output_file)
+        logger.info("Wrote %d records to %s", len(enriched), output_file)
+    return outputs
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Enrich raw OSINT data")
-    parser.add_argument(
-        "--input",
-        "-i",
-        required=True,
-        help="Directory containing raw JSON/JSONL files",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        required=True,
-        help="Directory to write enriched Parquet files",
-    )
+    parser = argparse.ArgumentParser(description="Enrich raw OSINT JSON/JSONL data")
+    parser.add_argument("--input", "-i", required=True, help="Input directory")
+    parser.add_argument("--output", "-o", required=True, help="Output directory")
     args = parser.parse_args()
     run(args.input, args.output)
 

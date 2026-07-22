@@ -1,9 +1,6 @@
 """Generate reports (PDF/CSV/JSON) from enriched data."""
 import argparse
-import json
-import os
 from pathlib import Path
-from typing import List, Dict, Any
 
 import pandas as pd
 

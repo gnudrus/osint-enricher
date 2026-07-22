@@ -1,77 +1,72 @@
-"""Entry point for running data ingestion."""
-import argparse
-import logging
-from pathlib import Path
-import json
-import os
-from typing import List, Dict, Any
+"""Command-line entry point for data ingestion."""
 
-from .twitter import TwitterConnector
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Any
+
+from .noaa import NOAAConnector
+from .open_aq import OpenAQConnector
 from .reddit import RedditConnector
 from .rss import RSSConnector
-from .open_aq import OpenAQConnector
-from .noaa import NOAAConnector
+from .twitter import TwitterConnector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def get_connector(name: str) -> object:
-    name = name.lower()
-    if name == "twitter":
+def get_connector(name: str) -> Any:
+    normalized = name.lower().replace("-", "_")
+    if normalized == "twitter":
         return TwitterConnector()
-    if name == "reddit":
+    if normalized == "reddit":
         return RedditConnector()
-    if name == "rss":
-        # Example URLs – replace with actual feeds or read from config
-        return RSSConnector([
-            "http://rss.cnn.com/rss/edition.rss",
-            "https://www.bbc.co.uk/news/world/rss/about.xml",
-        ])
-    if name == "open_aq":
+    if normalized == "rss":
+        urls = [url.strip() for url in os.getenv("RSS_FEEDS", "").split(",") if url.strip()]
+        if not urls:
+            urls = ["https://feeds.bbci.co.uk/news/world/rss.xml"]
+        return RSSConnector(urls)
+    if normalized in {"openaq", "open_aq"}:
         return OpenAQConnector()
-    if name == "noaa":
+    if normalized == "noaa":
         return NOAAConnector()
     raise ValueError(f"Unknown connector: {name}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Ingest raw OSINT data from various sources")
-    parser.add_argument(
-        "--sources",
-        "-s",
-        nargs="+",
-        required=True,
-        help="Names of sources to fetch (e.g., twitter reddit rss)",
-    )
-    parser.add_argument(
-        "--since",
-        default="30m",
-        help="How far back to fetch (e.g., 10m, 2h, 1d). Passed to each connector.",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        required=True,
-        help="Directory to write raw JSON lines files (one per source)",
-    )
-    args = parser.parse_args()
+def _source_names(values: list[str]) -> list[str]:
+    return [name.strip() for value in values for name in value.split(",") if name.strip()]
 
-    out_dir = Path(args.output)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    for src in args.sources:
+def ingest(sources: list[str], since: str, output: Path) -> int:
+    output.mkdir(parents=True, exist_ok=True)
+    failures = 0
+    for source in _source_names(sources):
         try:
-            conn = get_connector(src)
-            logger.info("Fetching from %s", src)
-            records: List[Dict[str, Any]] = list(conn.fetch(args.since))
-            out_file = out_dir / f"{src}.jsonl"
-            with out_file.open("w", encoding="utf-8") as f:
-                for rec in records:
-                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            logger.info("Saved %d records to %s", len(records), out_file)
-        except Exception as exc:  # pragma: no cover
-            logger.error("Failed to fetch from %s: %s", src, exc)
+            connector = get_connector(source)
+            records = list(connector.fetch(since))
+            destination = output / f"{source}.jsonl"
+            with destination.open("w", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            logger.info("Saved %d %s records to %s", len(records), source, destination)
+        except Exception as exc:
+            failures += 1
+            logger.error("Failed to fetch from %s: %s", source, exc)
+    return failures
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Ingest public OSINT data")
+    parser.add_argument("--sources", "-s", nargs="+", required=True, help="Sources, separated by spaces or commas")
+    parser.add_argument("--since", default="30m", help="Relative duration (30m, 2h, 1d) or ISO-8601 time")
+    parser.add_argument("--output", "-o", type=Path, required=True, help="Output directory for JSONL files")
+    args = parser.parse_args()
+    if ingest(args.sources, args.since, args.output):
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
